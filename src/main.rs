@@ -3,6 +3,8 @@ mod video_reader;
 use video_reader::VideoProbe;
 use std::path::PathBuf;
 use std::time::Instant;
+use std::fs::File;
+use std::io::Write;
 use clap::Parser;
 use cblas::{Layout, Transpose};
 
@@ -13,7 +15,10 @@ struct Args {
     video: PathBuf,
     calibration_start: usize,
     calibration_end: usize,
-    output: Option<PathBuf>
+    output: Option<PathBuf>,
+
+    #[arg(short, long, default_value_t = 3)]
+    num_components: usize,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,11 +48,50 @@ fn main() -> anyhow::Result<()> {
 
     println!("Read {frame_count} frames in {} s", t.elapsed().as_secs_f32());
 
+    let t = Instant::now();
     let calib_start = args.calibration_start;
     let calib_end = args.calibration_end;
     let calib = &frames[calib_start*frame_size..calib_end*frame_size];
     let mut data_mat: Vec<f32> = calib.iter().map(|&x| x as f32).collect();
-    let pc_vecs = pca(&mut data_mat, frame_size, 3);
+
+    println!(
+        "Allocated {} for calibration data",
+        format_bytes(4*frame_size*(calib_end-calib_start))
+    );
+
+    let n_pcs = args.num_components;
+    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs);
+
+    drop(data_mat);
+
+    println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
+
+    let t = Instant::now();
+    let mut buf = vec![0f32; frame_size];
+    let mut pc_coords = vec![0f32; n_pcs*frame_count];
+
+    for (i, frame) in frames.chunks(frame_size).enumerate() {
+        for (b, &pixel) in buf.iter_mut().zip(frame) {
+            *b = pixel as f32;
+        }
+
+        sgemv(false, 1., &pc_vecs, &buf, &mut pc_coords[n_pcs*i..n_pcs*(i+1)]);
+    }
+
+    println!("Transformed data in {} s", t.elapsed().as_secs_f32());
+
+    let mut f: Box<dyn Write> = match args.output {
+        Some(path) => Box::new(File::create(path)?),
+        None => Box::new(std::io::stdout().lock())
+    };
+
+    for i in 0..frame_count {
+        for j in 0..n_pcs {
+            write!(f, "{:e} ", pc_coords[i*n_pcs+j])?;
+        }
+
+        writeln!(f)?;
+    }
 
     Ok(())
 }
@@ -115,8 +159,7 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize) -> Vec<f32> {
             pcs_found += 1;
             prev_eigval = 0.;
         }
-        
-        prev_eigval = eigval;
+        else { prev_eigval = eigval; }
     }
 }
 
