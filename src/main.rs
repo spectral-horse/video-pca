@@ -8,6 +8,8 @@ use std::time::Instant;
 use std::fs::File;
 use std::io::Write;
 use clap::Parser;
+use image::ImageReader;
+use anyhow::bail;
 
 
 
@@ -22,17 +24,37 @@ struct Args {
     num_components: usize,
 
     #[arg(short, long, default_value_t = 1e-4)]
-    precision: f32
+    precision: f32,
+
+    #[arg(short, long)]
+    mask: Option<PathBuf>
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let probe = VideoProbe::new(args.video)?;
-    let frame_size = probe.width*probe.height;
+
+    let mask: Vec<bool> = match args.mask {
+        Some(path) => {
+            let img = ImageReader::open(path)?.decode()?.into_luma8();
+            let width = img.width() as usize;
+            let height = img.height() as usize;
+
+            if width != probe.width || height != probe.height {
+                bail!("Mask size does not match video size");
+            }
+
+            img.pixels().map(|p| p[0] > 0).collect()
+        }
+        None => vec![true; probe.width*probe.height]
+    };
+
+    let frame_size = mask.iter().map(|&x| x as usize).sum();
     let size_approx = frame_size*(probe.n_frames_approx+10);
 
     let mut frames = vec![0u8; size_approx];
     let mut frame_count = 0;
+    let mut pixel_pos = 0;
 
     println!("Allocated {} for video data", format_bytes(size_approx));
     println!("Reading video...");
@@ -40,15 +62,17 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
 
     for frame in probe.open_reader()? {
-        let start = frame_size*frame_count;
-        let dst = &mut frames[start..start+frame_size];
-
-        dst.copy_from_slice(&frame?);
+        for (&m, src) in mask.iter().zip(frame?) {
+            if m {
+                frames[pixel_pos] = src;
+                pixel_pos += 1;
+            }
+        }
 
         frame_count += 1;
     }
 
-    frames.truncate(frame_count*frame_size);
+    frames.truncate(pixel_pos);
 
     println!("Read {frame_count} frames in {} s", t.elapsed().as_secs_f32());
 
