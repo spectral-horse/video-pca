@@ -19,6 +19,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 3)]
     num_components: usize,
+
+    #[arg(short, long, default_value_t = 1e-4)]
+    precision: f32
 }
 
 fn main() -> anyhow::Result<()> {
@@ -60,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let n_pcs = args.num_components;
-    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs);
+    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs, args.precision);
 
     drop(data_mat);
 
@@ -129,7 +132,8 @@ fn sger(alpha: f32, x: &[f32], y: &[f32], mat: &mut [f32]) {
     }
 }
 
-fn pca(data: &mut [f32], cols: usize, n_pcs: usize) -> Vec<f32> {
+fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
+-> Vec<f32> {
     let rows = data.len()/cols;
     let mut pcs_found = 0;
     let mut pcs = vec![0f32; n_pcs*cols];
@@ -151,7 +155,7 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize) -> Vec<f32> {
 
         let eigval = unsafe { cblas::sdot(rows as i32, &s, 1, &s, 1) };
 
-        if prev_eigval > 0. && (prev_eigval-eigval).abs()/eigval < 0.0001 {
+        if prev_eigval > 0. && (prev_eigval-eigval).abs()/eigval < precision {
             normalise(&mut r);
             sger(-1., &s, &r, data);
 
