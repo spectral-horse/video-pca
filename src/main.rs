@@ -1,12 +1,13 @@
 mod video_reader;
+mod blas;
 
+use blas::*;
 use video_reader::VideoProbe;
 use std::path::PathBuf;
 use std::time::Instant;
 use std::fs::File;
 use std::io::Write;
 use clap::Parser;
-use cblas::{Layout, Transpose};
 
 
 
@@ -110,28 +111,6 @@ fn format_bytes(n: usize) -> String {
     else { format!("{:.2} {unit}", n as f64/scale) }
 }
 
-fn sgemv(trans: bool, alpha: f32, mat: &[f32], vec: &[f32], out: &mut [f32]) {
-    let rows = if trans { vec.len() } else { out.len() };
-    let cols = if trans { out.len() } else { vec.len() };
-    let t = if trans { Transpose::Ordinary } else { Transpose::None };
-
-    unsafe {
-        cblas::sgemv(
-            Layout::RowMajor, t, rows as i32, cols as i32, alpha,
-            mat, cols as i32, vec, 1, 0., out, 1
-        );
-    }
-}
-
-fn sger(alpha: f32, x: &[f32], y: &[f32], mat: &mut [f32]) {
-    unsafe {
-        cblas::sger(
-            Layout::RowMajor, x.len() as i32, y.len() as i32, alpha,
-            x, 1, y, 1, mat, y.len() as i32
-        );
-    }
-}
-
 fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
 -> Vec<f32> {
     let rows = data.len()/cols;
@@ -153,7 +132,7 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
         sgemv(false, 1., data, &r, &mut s);
         sgemv(true, 1., data, &s, &mut r);
 
-        let eigval = unsafe { cblas::sdot(rows as i32, &s, 1, &s, 1) };
+        let eigval = sdot(&s, &s);
 
         if prev_eigval > 0. && (prev_eigval-eigval).abs()/eigval < precision {
             normalise(&mut r);
@@ -170,7 +149,7 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
 }
 
 fn normalise(vec: &mut [f32]) {
-    let norm = vec.iter().map(|&x| (x as f32).powi(2)).sum::<f32>().sqrt();
+    let norm = sdot(vec, vec).sqrt();
 
     for v in vec { *v /= norm; }
 }
