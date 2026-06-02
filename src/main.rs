@@ -16,8 +16,8 @@ use anyhow::bail;
 #[derive(Parser)]
 struct Args {
     video: PathBuf,
-    calibration_start: usize,
-    calibration_end: usize,
+    calibration_start: f32,
+    calibration_end: f32,
     output: Option<PathBuf>,
 
     #[arg(short, long, default_value_t = 3)]
@@ -77,8 +77,8 @@ fn main() -> anyhow::Result<()> {
     println!("Read {frame_count} frames in {} s", t.elapsed().as_secs_f32());
 
     let t = Instant::now();
-    let calib_start = args.calibration_start;
-    let calib_end = args.calibration_end;
+    let calib_start = (args.calibration_start*probe.fps) as usize;
+    let calib_end = (args.calibration_end*probe.fps) as usize;
     let calib = &frames[calib_start*frame_size..calib_end*frame_size];
     let mut data_mat: Vec<f32> = calib.iter().map(|&x| x as f32).collect();
 
@@ -108,6 +108,8 @@ fn main() -> anyhow::Result<()> {
 
     println!("Transformed data in {} s", t.elapsed().as_secs_f32());
 
+    remove_mean(&mut pc_coords, n_pcs);
+
     let mut f: Box<dyn Write> = match args.output {
         Some(path) => Box::new(File::create(path)?),
         None => Box::new(std::io::stdout().lock())
@@ -135,19 +137,25 @@ fn format_bytes(n: usize) -> String {
     else { format!("{:.2} {unit}", n as f64/scale) }
 }
 
+fn remove_mean(data: &mut [f32], cols: usize) {
+    let rows = data.len()/cols;
+    let ones = vec![1f32; rows];
+    let mut mean = vec![0f32; cols];
+
+    sgemv(true, 1., data, &ones, &mut mean);
+    sger(-1./rows as f32, &ones, &mean, data);
+}
+
 fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
 -> Vec<f32> {
     let rows = data.len()/cols;
     let mut pcs_found = 0;
     let mut pcs = vec![0f32; n_pcs*cols];
-    let mut r = vec![0f32; cols];
-    let mut s = vec![1f32; rows];
+    let mut r = vec![1f32; cols];
+    let mut s = vec![0f32; rows];
     let mut prev_eigval = 0.;
 
-    sgemv(true, 1./rows as f32, data, &s, &mut r);
-    sger(-1., &s, &r, data);
-
-    r.fill(1.);
+    remove_mean(data, cols);
 
     loop {
         if pcs_found == n_pcs { return pcs; }
