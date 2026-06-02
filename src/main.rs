@@ -86,8 +86,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     for i in 0..frame_count {
+        write!(f, "{:e}", i as f32/probe.fps)?;
+
         for j in 0..n_pcs {
-            write!(f, "{:e} ", pc_coords[i*n_pcs+j])?;
+            write!(f, " {:e}", pc_coords[i*n_pcs+j])?;
         }
 
         writeln!(f)?;
