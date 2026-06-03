@@ -115,6 +115,9 @@ fn main() -> anyhow::Result<()> {
         None => Box::new(std::io::stdout().lock())
     };
 
+    writeln!(f, "# calibration start index = {calib_start}")?;
+    writeln!(f, "# calibration end index = {calib_end}")?;
+
     for i in 0..frame_count {
         write!(f, "{:e}", i as f32/probe.fps)?;
 
