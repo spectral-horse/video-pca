@@ -6,7 +6,7 @@ use video_reader::VideoProbe;
 use std::path::PathBuf;
 use std::time::Instant;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use clap::Parser;
 use image::ImageReader;
 use anyhow::bail;
@@ -49,9 +49,80 @@ fn main() -> anyhow::Result<()> {
         None => vec![true; probe.width*probe.height]
     };
 
-    let frame_size = mask.iter().map(|&x| x as usize).sum();
-    let size_approx = frame_size*(probe.n_frames_approx+10);
+    let fps = probe.fps;
+    let frame_size = mask.iter().filter(|&&x| x).count();
+    let (n_frames, frames) = read_video_masked(probe, &mask)?;
 
+    let t = Instant::now();
+    let calib_start = (args.calibration_start*fps) as usize;
+    let calib_end = (args.calibration_end*fps) as usize;
+    let calib = &frames[calib_start*frame_size..calib_end*frame_size];
+    let mut data_mat: Vec<f32> = calib.iter().map(|&x| x as f32).collect();
+
+    println!(
+        "Allocated {} for calibration data",
+        format_bytes(4*frame_size*(calib_end-calib_start))
+    );
+
+    let n_pcs = args.num_components;
+    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs, args.precision);
+
+    drop(data_mat);
+
+    println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
+
+    let t = Instant::now();
+    let mut buf = vec![0f32; frame_size];
+    let mut pc_coords = vec![0f32; n_pcs*n_frames];
+
+    for (i, frame) in frames.chunks(frame_size).enumerate() {
+        for (b, &pixel) in buf.iter_mut().zip(frame) {
+            *b = pixel as f32;
+        }
+
+        sgemv(false, 1., &pc_vecs, &buf, &mut pc_coords[n_pcs*i..n_pcs*(i+1)]);
+    }
+
+    println!("Transformed data in {} s", t.elapsed().as_secs_f32());
+
+    remove_mean(&mut pc_coords, n_pcs);
+
+    match args.output {
+        Some(path) => save_pc_data(
+            File::create(path)?, calib_start, calib_end, &pc_coords, n_pcs, fps
+        )?,
+        None => save_pc_data(
+            io::stdout().lock(), calib_start, calib_end, &pc_coords, n_pcs, fps
+        )?
+    }
+
+    Ok(())
+}
+
+fn save_pc_data(
+    mut f: impl Write, calib_start: usize, calib_end: usize,
+    pc_coords: &[f32], n_pcs: usize, fps: f32
+) -> io::Result<()> {
+    writeln!(f, "# calibration start index = {calib_start}")?;
+    writeln!(f, "# calibration end index = {calib_end}")?;
+
+    for (i, row) in pc_coords.chunks(n_pcs).enumerate() {
+        write!(f, "{:e}", i as f32/fps)?;
+
+        for coord in row {
+            write!(f, " {coord:e}")?;
+        }
+
+        writeln!(f)?;
+    }
+
+    Ok(())
+}
+
+fn read_video_masked(probe: VideoProbe, mask: &[bool])
+-> anyhow::Result<(usize, Vec<u8>)> {
+    let frame_size = mask.iter().filter(|&&x| x).count();
+    let size_approx = frame_size*(probe.n_frames_approx+10);
     let mut frames = vec![0u8; size_approx];
     let mut frame_count = 0;
     let mut pixel_pos = 0;
@@ -72,63 +143,11 @@ fn main() -> anyhow::Result<()> {
         frame_count += 1;
     }
 
-    frames.truncate(pixel_pos);
-
     println!("Read {frame_count} frames in {} s", t.elapsed().as_secs_f32());
 
-    let t = Instant::now();
-    let calib_start = (args.calibration_start*probe.fps) as usize;
-    let calib_end = (args.calibration_end*probe.fps) as usize;
-    let calib = &frames[calib_start*frame_size..calib_end*frame_size];
-    let mut data_mat: Vec<f32> = calib.iter().map(|&x| x as f32).collect();
+    frames.truncate(pixel_pos);
 
-    println!(
-        "Allocated {} for calibration data",
-        format_bytes(4*frame_size*(calib_end-calib_start))
-    );
-
-    let n_pcs = args.num_components;
-    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs, args.precision);
-
-    drop(data_mat);
-
-    println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
-
-    let t = Instant::now();
-    let mut buf = vec![0f32; frame_size];
-    let mut pc_coords = vec![0f32; n_pcs*frame_count];
-
-    for (i, frame) in frames.chunks(frame_size).enumerate() {
-        for (b, &pixel) in buf.iter_mut().zip(frame) {
-            *b = pixel as f32;
-        }
-
-        sgemv(false, 1., &pc_vecs, &buf, &mut pc_coords[n_pcs*i..n_pcs*(i+1)]);
-    }
-
-    println!("Transformed data in {} s", t.elapsed().as_secs_f32());
-
-    remove_mean(&mut pc_coords, n_pcs);
-
-    let mut f: Box<dyn Write> = match args.output {
-        Some(path) => Box::new(File::create(path)?),
-        None => Box::new(std::io::stdout().lock())
-    };
-
-    writeln!(f, "# calibration start index = {calib_start}")?;
-    writeln!(f, "# calibration end index = {calib_end}")?;
-
-    for i in 0..frame_count {
-        write!(f, "{:e}", i as f32/probe.fps)?;
-
-        for j in 0..n_pcs {
-            write!(f, " {:e}", pc_coords[i*n_pcs+j])?;
-        }
-
-        writeln!(f)?;
-    }
-
-    Ok(())
+    Ok((frame_count, frames))
 }
 
 fn format_bytes(n: usize) -> String {
