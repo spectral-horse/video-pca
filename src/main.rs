@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use clap::Parser;
 use image::ImageReader;
 use anyhow::bail;
+use ndarray::prelude::*;
 
 
 
@@ -34,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let probe = VideoProbe::new(args.video)?;
 
-    let mask: Vec<bool> = match args.mask {
+    let mask = match args.mask {
         Some(path) => {
             let img = ImageReader::open(path)?.decode()?.into_luma8();
             let width = img.width() as usize;
@@ -44,55 +45,51 @@ fn main() -> anyhow::Result<()> {
                 bail!("Mask size does not match video size");
             }
 
-            img.pixels().map(|p| p[0] > 0).collect()
+            let values: Vec<bool> = img.pixels().map(|p| p[0] > 0).collect();
+
+            Array2::from_shape_vec((height, width), values).unwrap()
         }
-        None => vec![true; probe.width*probe.height]
+        None => Array2::from_elem((probe.height, probe.width), true)
     };
 
     let fps = probe.fps;
-    let frame_size = mask.iter().filter(|&&x| x).count();
-    let (n_frames, frames) = read_video_masked(probe, &mask)?;
+    let frames = read_video_masked(probe, &mask)?;
 
     let t = Instant::now();
     let calib_start = (args.calibration_start*fps) as usize;
     let calib_end = (args.calibration_end*fps) as usize;
-    let calib = &frames[calib_start*frame_size..calib_end*frame_size];
-    let mut data_mat: Vec<f32> = calib.iter().map(|&x| x as f32).collect();
+    let calib = frames.slice(s![calib_start..calib_end, ..]);
+    let mut data_mat = calib.mapv(|x| x as f32);
 
-    println!(
-        "Allocated {} for calibration data",
-        format_bytes(4*frame_size*(calib_end-calib_start))
-    );
+    println!("Allocated {} for calibration data", format_bytes(4*calib.len()));
 
     let n_pcs = args.num_components;
-    let pc_vecs = pca(&mut data_mat, frame_size, n_pcs, args.precision);
+    let pc_vecs = pca(&mut data_mat, n_pcs, args.precision);
 
     drop(data_mat);
 
     println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
 
     let t = Instant::now();
-    let mut buf = vec![0f32; frame_size];
-    let mut pc_coords = vec![0f32; n_pcs*n_frames];
+    let mut buf = Array1::zeros(calib.ncols());
+    let mut pc_coords = Array2::zeros((frames.nrows(), n_pcs));
 
-    for (i, frame) in frames.chunks(frame_size).enumerate() {
-        for (b, &pixel) in buf.iter_mut().zip(frame) {
-            *b = pixel as f32;
-        }
+    azip!((frame in frames.rows(), mut pcs in pc_coords.rows_mut()) {
+        azip!((b in &mut buf, &pixel in frame) *b = pixel as f32);
 
-        sgemv(false, 1., &pc_vecs, &buf, &mut pc_coords[n_pcs*i..n_pcs*(i+1)]);
-    }
+        sgemv(false, 1., &pc_vecs, &buf, &mut pcs);
+    });
 
     println!("Transformed data in {} s", t.elapsed().as_secs_f32());
 
-    remove_mean(&mut pc_coords, n_pcs);
+    remove_mean(&mut pc_coords);
 
     match args.output {
         Some(path) => save_pc_data(
-            File::create(path)?, calib_start, calib_end, &pc_coords, n_pcs, fps
+            File::create(path)?, calib_start, calib_end, &pc_coords, fps
         )?,
         None => save_pc_data(
-            io::stdout().lock(), calib_start, calib_end, &pc_coords, n_pcs, fps
+            io::stdout().lock(), calib_start, calib_end, &pc_coords, fps
         )?
     }
 
@@ -101,12 +98,12 @@ fn main() -> anyhow::Result<()> {
 
 fn save_pc_data(
     mut f: impl Write, calib_start: usize, calib_end: usize,
-    pc_coords: &[f32], n_pcs: usize, fps: f32
+    pc_coords: &ArrayRef2<f32>, fps: f32
 ) -> io::Result<()> {
     writeln!(f, "# calibration start index = {calib_start}")?;
     writeln!(f, "# calibration end index = {calib_end}")?;
 
-    for (i, row) in pc_coords.chunks(n_pcs).enumerate() {
+    for (i, row) in pc_coords.rows().into_iter().enumerate() {
         write!(f, "{:e}", i as f32/fps)?;
 
         for coord in row {
@@ -119,13 +116,12 @@ fn save_pc_data(
     Ok(())
 }
 
-fn read_video_masked(probe: VideoProbe, mask: &[bool])
--> anyhow::Result<(usize, Vec<u8>)> {
+fn read_video_masked(probe: VideoProbe, mask: &ArrayRef2<bool>)
+-> anyhow::Result<Array2<u8>> {
     let frame_size = mask.iter().filter(|&&x| x).count();
     let size_approx = frame_size*(probe.n_frames_approx+10);
-    let mut frames = vec![0u8; size_approx];
+    let mut pixels = Vec::with_capacity(size_approx);
     let mut frame_count = 0;
-    let mut pixel_pos = 0;
 
     println!("Allocated {} for video data", format_bytes(size_approx));
     println!("Reading video...");
@@ -134,10 +130,7 @@ fn read_video_masked(probe: VideoProbe, mask: &[bool])
 
     for frame in probe.open_reader()? {
         for (&m, src) in mask.iter().zip(frame?) {
-            if m {
-                frames[pixel_pos] = src;
-                pixel_pos += 1;
-            }
+            if m { pixels.push(src); }
         }
 
         frame_count += 1;
@@ -145,9 +138,10 @@ fn read_video_masked(probe: VideoProbe, mask: &[bool])
 
     println!("Read {frame_count} frames in {} s", t.elapsed().as_secs_f32());
 
-    frames.truncate(pixel_pos);
+    let shape = (frame_count, frame_size);
+    let frames = Array2::from_shape_vec(shape, pixels).unwrap();
 
-    Ok((frame_count, frames))
+    Ok(frames)
 }
 
 fn format_bytes(n: usize) -> String {
@@ -159,25 +153,22 @@ fn format_bytes(n: usize) -> String {
     else { format!("{:.2} {unit}", n as f64/scale) }
 }
 
-fn remove_mean(data: &mut [f32], cols: usize) {
-    let rows = data.len()/cols;
-    let ones = vec![1f32; rows];
-    let mut mean = vec![0f32; cols];
+fn remove_mean(data: &mut ArrayRef2<f32>) {
+    let ones = Array1::from_elem(data.nrows(), 1.);
+    let mut mean = Array1::zeros(data.ncols());
 
     sgemv(true, 1., data, &ones, &mut mean);
-    sger(-1./rows as f32, &ones, &mean, data);
+    sger(-1./data.nrows() as f32, &ones, &mean, data);
 }
 
-fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
--> Vec<f32> {
-    let rows = data.len()/cols;
+fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, precision: f32) -> Array2<f32> {
     let mut pcs_found = 0;
-    let mut pcs = vec![0f32; n_pcs*cols];
-    let mut r = vec![1f32; cols];
-    let mut s = vec![0f32; rows];
+    let mut pcs = Array2::zeros((n_pcs, data.ncols()));
+    let mut r = Array1::from_elem(data.ncols(), 1.);
+    let mut s = Array1::zeros(data.nrows());
     let mut prev_eigval = 0.;
 
-    remove_mean(data, cols);
+    remove_mean(data);
 
     loop {
         if pcs_found == n_pcs { return pcs; }
@@ -192,7 +183,7 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
             normalise(&mut r);
             sger(-1., &s, &r, data);
 
-            pcs[cols*pcs_found..cols*(pcs_found+1)].copy_from_slice(&r);
+            pcs.row_mut(pcs_found).assign(&r);
             r.fill(1.);
 
             pcs_found += 1;
@@ -202,8 +193,6 @@ fn pca(data: &mut [f32], cols: usize, n_pcs: usize, precision: f32)
     }
 }
 
-fn normalise(vec: &mut [f32]) {
-    let norm = sdot(vec, vec).sqrt();
-
-    for v in vec { *v /= norm; }
+fn normalise(vec: &mut ArrayRef1<f32>) {
+    *vec /= sdot(vec, vec).sqrt();
 }
