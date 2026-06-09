@@ -129,9 +129,11 @@ fn read_video_masked(probe: VideoProbe, mask: &ArrayRef2<bool>)
     let t = Instant::now();
 
     for frame in probe.open_reader()? {
-        for (&m, src) in mask.iter().zip(frame?) {
+        let frame = Array2::from_shape_vec(mask.dim(), frame?).unwrap();
+
+        azip!((&m in mask, &src in &frame) {
             if m { pixels.push(src); }
-        }
+        });
 
         frame_count += 1;
     }
