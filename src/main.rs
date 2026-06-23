@@ -1,5 +1,6 @@
 mod video_reader;
 mod blas;
+mod rand;
 
 use blas::*;
 use video_reader::VideoProbe;
@@ -24,8 +25,8 @@ struct Args {
     #[arg(short, long, default_value_t = 3)]
     num_components: usize,
 
-    #[arg(short, long, default_value_t = 1e-4)]
-    precision: f32,
+    #[arg(short = 's', long, default_value_t = 10)]
+    oversampling: usize,
 
     #[arg(short, long)]
     mask: Option<PathBuf>
@@ -64,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     println!("Allocated {} for calibration data", format_bytes(4*calib.len()));
 
     let n_pcs = args.num_components;
-    let pc_vecs = pca(&mut data_mat, n_pcs, args.precision);
+    let pc_vecs = pca(&mut data_mat, n_pcs, 10);
 
     drop(data_mat);
 
@@ -163,38 +164,27 @@ fn remove_mean(data: &mut ArrayRef2<f32>) {
     sger(-1./data.nrows() as f32, &ones, &mean, data);
 }
 
-fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, precision: f32) -> Array2<f32> {
-    let mut pcs_found = 0;
-    let mut pcs = Array2::zeros((n_pcs, data.ncols()));
-    let mut r = Array1::from_elem(data.ncols(), 1.);
-    let mut s = Array1::zeros(data.nrows());
-    let mut prev_eigval = 0.;
-
+fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, oversampling: usize)
+-> Array2<f32> {
     remove_mean(data);
 
-    loop {
-        if pcs_found == n_pcs { return pcs; }
+    let (m, n) = data.dim();
+    let l = n_pcs+oversampling;
+    let omega = Array2::from_shape_fn((n, l), |_| rand::rand_normal());
+    let mut tau = Array1::zeros(l);
+    let mut y = Array2::zeros((m, l));
+    let mut b = Array2::zeros((l, n));
+    
+    sgemm(false, false, 1., &data, &omega, &mut y);
+    sgeqrf(&mut y, &mut tau);
+    sorgqr(&mut y, &tau);
+    sgemm(true, false, 1., &y, &data, &mut b);
 
-        normalise(&mut r);
-        sgemv(false, 1., data, &r, &mut s);
-        sgemv(true, 1., data, &s, &mut r);
+    let mut s = Array1::zeros(l);
+    let mut u = Array2::zeros((l, l));
+    let mut vt = Array2::zeros((l, n));
 
-        let eigval = sdot(&s, &s);
+    sgesdd(&mut b, &mut s, &mut u, &mut vt);
 
-        if prev_eigval > 0. && (prev_eigval-eigval).abs()/eigval < precision {
-            normalise(&mut r);
-            sger(-1., &s, &r, data);
-
-            pcs.row_mut(pcs_found).assign(&r);
-            r.fill(1.);
-
-            pcs_found += 1;
-            prev_eigval = 0.;
-        }
-        else { prev_eigval = eigval; }
-    }
-}
-
-fn normalise(vec: &mut ArrayRef1<f32>) {
-    *vec /= sdot(vec, vec).sqrt();
+    vt.slice(s![..n_pcs, ..]).into_owned()
 }
