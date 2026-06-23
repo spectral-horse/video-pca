@@ -65,11 +65,21 @@ fn main() -> anyhow::Result<()> {
     println!("Allocated {} for calibration data", format_bytes(4*calib.len()));
 
     let n_pcs = args.num_components;
-    let pc_vecs = pca(&mut data_mat, n_pcs, 10);
+    let (pc_vecs, variances) = pca(&mut data_mat, n_pcs, 10);
+    let variance_max = variances.fold(0f32, |acc, &v| acc.max(v));
 
     drop(data_mat);
 
     println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
+    println!("Variances:");
+
+    for (i, variance) in variances.indexed_iter() {
+        let x = (140.*variance/variance_max) as usize;
+        let c = ["", "-"][x%2];
+        let width = x/2;
+
+        println!("{i:>2} | {:#<width$}{}", "", c);
+    }
 
     let t = Instant::now();
     let mut buf = Array1::zeros(calib.ncols());
@@ -165,7 +175,7 @@ fn remove_mean(data: &mut ArrayRef2<f32>) {
 }
 
 fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, oversampling: usize)
--> Array2<f32> {
+-> (Array2<f32>, Array1<f32>) {
     remove_mean(data);
 
     let (m, n) = data.dim();
@@ -186,5 +196,8 @@ fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, oversampling: usize)
 
     sgesdd(&mut b, &mut s, &mut u, &mut vt);
 
-    vt.slice(s![..n_pcs, ..]).into_owned()
+    let pc_vecs = vt.slice(s![..n_pcs, ..]).into_owned();
+    let variances = s.slice(s![..n_pcs]).mapv(|v| v*v);
+
+    (pc_vecs, variances)
 }
