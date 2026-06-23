@@ -20,6 +20,8 @@ struct Args {
     video: PathBuf,
     calibration_start: f32,
     calibration_end: f32,
+
+    #[arg(short, long)]
     output: Option<PathBuf>,
 
     #[arg(short, long, default_value_t = 3)]
