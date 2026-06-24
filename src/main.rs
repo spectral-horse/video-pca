@@ -18,8 +18,12 @@ use ndarray::prelude::*;
 #[derive(Parser)]
 struct Args {
     video: PathBuf,
-    calibration_start: f32,
-    calibration_end: f32,
+
+    #[arg(long, default_value_t = 0.)]
+    t0: f32,
+
+    #[arg(long)]
+    t1: Option<f32>,
 
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -59,17 +63,15 @@ fn main() -> anyhow::Result<()> {
     let frames = read_video_masked(probe, &mask)?;
 
     let t = Instant::now();
-    let calib_start = (args.calibration_start*fps) as usize;
-    let calib_end = (args.calibration_end*fps) as usize;
+    let calib_start = (args.t0*fps) as usize;
+    let calib_end = match args.t1 {
+        Some(t1) => (t1*fps) as usize,
+        None => frames.nrows()
+    };
+
     let calib = frames.slice(s![calib_start..calib_end, ..]);
-    let mut data_mat = calib.mapv(|x| x as f32);
-
-    println!("Allocated {} for calibration data", format_bytes(4*calib.len()));
-
     let n_pcs = args.num_components;
-    let (pc_vecs, variances) = pca(&mut data_mat, n_pcs, 10);
-
-    drop(data_mat);
+    let (pc_vecs, variances) = pca(&calib, n_pcs, 10);
 
     println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
     println!("Variances:");
@@ -87,7 +89,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("Transformed data in {} s", t.elapsed().as_secs_f32());
 
-    remove_mean(&mut pc_coords);
+    pc_coords -= &row_mean(&pc_coords);
 
     match args.output {
         Some(path) => save_pc_data(
@@ -172,29 +174,38 @@ fn format_bytes(n: usize) -> String {
     else { format!("{:.2} {unit}", n as f64/scale) }
 }
 
-fn remove_mean(data: &mut ArrayRef2<f32>) {
-    let ones = Array1::from_elem(data.nrows(), 1.);
-    let mut mean = Array1::zeros(data.ncols());
+fn row_mean<A: Copy + Into<f32>>(data: &ArrayRef2<A>) -> Array1<f32> {
+    let n = data.nrows() as f32;
 
-    sgemv(true, 1., data, &ones, &mut mean);
-    sger(-1./data.nrows() as f32, &ones, &mean, data);
+    data.fold_axis(Axis(0), 0f32, |&acc, &v| acc+v.into())
+        .mapv_into(|v| v/n)
 }
 
-fn pca(data: &mut ArrayRef2<f32>, n_pcs: usize, oversampling: usize)
+fn pca(data: &ArrayRef2<u8>, n_pcs: usize, oversampling: usize)
 -> (Array2<f32>, Array1<f32>) {
-    remove_mean(data);
-
+    let rmean = row_mean(data);
     let (m, n) = data.dim();
     let l = n_pcs+oversampling;
     let omega = Array2::from_shape_fn((n, l), |_| rand::rand_normal());
+    let mut buf = Array1::zeros(n);
     let mut tau = Array1::zeros(l);
     let mut y = Array2::zeros((m, l));
     let mut b = Array2::zeros((l, n));
-    
-    sgemm(false, false, 1., &data, &omega, &mut y);
+
+    azip!((data_row in data.rows(), mut y_row in y.rows_mut()) {
+        azip!((v in &mut buf, &d in data_row, &m in &rmean) *v = d as f32-m);
+
+        sgemv(true, 1., &omega, &buf, &mut y_row);
+    });
+
     sgeqrf(&mut y, &mut tau);
     sorgqr(&mut y, &tau);
-    sgemm(true, false, 1., &y, &data, &mut b);
+
+    azip!((data_row in data.rows(), y_row in y.rows()) {
+        azip!((v in &mut buf, &d in data_row, &m in &rmean) *v = d as f32-m);
+
+        sger(1., &y_row, &buf, &mut b);
+    });
 
     let mut s = Array1::zeros(l);
     let mut u = Array2::zeros((l, l));
