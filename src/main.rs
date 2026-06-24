@@ -68,20 +68,12 @@ fn main() -> anyhow::Result<()> {
 
     let n_pcs = args.num_components;
     let (pc_vecs, variances) = pca(&mut data_mat, n_pcs, 10);
-    let variance_max = variances.fold(0f32, |acc, &v| acc.max(v));
 
     drop(data_mat);
 
     println!("Computed PCs in {} s", t.elapsed().as_secs_f32());
     println!("Variances:");
-
-    for (i, variance) in variances.indexed_iter() {
-        let x = (140.*variance/variance_max) as usize;
-        let c = ["", "-"][x%2];
-        let width = x/2;
-
-        println!("{i:>2} | {:#<width$}{}", "", c);
-    }
+    print_bar_chart(&variances, 70);
 
     let t = Instant::now();
     let mut buf = Array1::zeros(calib.ncols());
@@ -107,6 +99,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_bar_chart(values: &ArrayRef1<f32>, max_width: usize) {
+    let max = values.fold(0f32, |acc, &v| acc.max(v));
+
+    for (i, value) in values.indexed_iter() {
+        let x = (max_width as f32*2.*value/max) as usize;
+        let c = ["", "-"][x%2];
+        let width = x/2;
+
+        println!("{i:>2} | {:#<width$}{}", "", c);
+    }
 }
 
 fn save_pc_data(
