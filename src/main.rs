@@ -28,6 +28,9 @@ struct Args {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    #[arg(short, long)]
+    variance_output: Option<PathBuf>,
+
     #[arg(short, long, default_value_t = 3)]
     num_components: usize,
 
@@ -98,6 +101,16 @@ fn main() -> anyhow::Result<()> {
         None => save_pc_data(
             io::stdout().lock(), calib_start, calib_end, &pc_coords, fps
         )?
+    }
+
+    if let Some(path) = args.variance_output {
+        let mut f = File::create(path)?;
+
+        writeln!(f, "# PC index, variance, fraction of max variance")?;
+
+        for (i, v) in variances.iter().enumerate() {
+            writeln!(f, "{i} {v} {}", v/variances[0])?;
+        }
     }
 
     Ok(())
