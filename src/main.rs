@@ -16,6 +16,12 @@ use ndarray::prelude::*;
 
 
 #[derive(Parser)]
+/// Extract the principal components of a time-varying image sequence (a video).
+/// 
+/// This tool performs principal component analysis on an image sequence read
+/// from a video file, optionally masking each frame with a boolean mask, and
+/// can output the principal component values along with associated variances.
+/// This is done by randomised SVD (Halko).
 struct Args {
     video: PathBuf,
 
