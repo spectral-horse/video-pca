@@ -32,6 +32,9 @@ struct Args {
     t1: Option<f32>,
 
     #[arg(short, long)]
+    just_range: bool,
+
+    #[arg(short, long)]
     output: Option<PathBuf>,
 
     #[arg(short, long)]
@@ -87,7 +90,8 @@ fn main() -> anyhow::Result<()> {
     print_bar_chart(&variances, 70);
 
     let t = Instant::now();
-    let mut buf = Array1::zeros(calib.ncols());
+    let frames = if args.just_range { calib } else { frames.view() };
+    let mut buf = Array1::zeros(frames.ncols());
     let mut pc_coords = Array2::zeros((frames.nrows(), n_pcs));
 
     azip!((frame in frames.rows(), mut pcs in pc_coords.rows_mut()) {
